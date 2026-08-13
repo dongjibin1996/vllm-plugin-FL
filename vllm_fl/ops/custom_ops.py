@@ -14,6 +14,31 @@ from .rotary_embedding import *  # noqa F403 F401
 
 logger = logging.getLogger(__name__)
 
+
+def _is_kunlunxin_platform() -> bool:
+    """Whether the current runtime should use Kunlunxin XPU patches.
+
+    Matches the direct bypass patch's recognition: explicit
+    ``VLLM_KUNLUNXIN_BYPASS_GDN`` wins; otherwise fall back to the platform
+    marker ``VLLM_FL_PLATFORM=kunlunxin``.
+    """
+    import os
+
+    value = os.environ.get("VLLM_KUNLUNXIN_BYPASS_GDN")
+    if value is None:
+        return os.environ.get("VLLM_FL_PLATFORM", "").strip().lower() == "kunlunxin"
+    return value.strip().lower() not in ("0", "false", "no")
+
+
+def _apply_kunlunxin_patches() -> None:
+    """Apply Kunlunxin XPU monkey-patches when the GDN bypass is active."""
+    if _is_kunlunxin_platform():
+        from vllm_fl.dispatch.backends.vendor.kunlunxin.patch import (
+            apply_kunlunxin_patches,
+        )
+        apply_kunlunxin_patches()
+
+
 # Mapping from OOT operator name (op_name, internal/whitelist) to (class, registration_name).
 # registration_name is passed to CustomOp.register_oot and must match what vLLM uses
 # when looking up the OOT op (typically the base class name).
@@ -124,6 +149,7 @@ def register_oot_ops(whitelist: list[str] | None = None) -> None:
     if not is_oot_enabled():
         # Patch the upstream oracle so in-tree FusedMoE works on this platform.
         _patch_unquantized_moe_oracle()
+        _apply_kunlunxin_patches()
         return
 
     # Get blacklist (from env var or platform config)
@@ -181,3 +207,8 @@ def register_oot_ops(whitelist: list[str] | None = None) -> None:
         if getattr(current_platform, "vendor_name", None) == "gcu":
             from vllm_fl.dispatch.backends.vendor.gcu.patch import apply_gcu_patches
             apply_gcu_patches()
+
+    # Apply Kunlunxin XPU monkey-patches (GDN fused post-conv bypass) when
+    # VLLM_KUNLUNXIN_BYPASS_GDN=1 or VLLM_FL_PLATFORM=kunlunxin. This runs
+    # outside the per-op loop so it triggers even if ops_to_register is empty.
+    _apply_kunlunxin_patches()
